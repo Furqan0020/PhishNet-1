@@ -740,26 +740,81 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/landing-pages/clone", isAuthenticated, hasOrganization, async (req, res) => {
     try {
       const { url } = req.body;
-      
+
       if (!url || typeof url !== 'string') {
         return res.status(400).json({ message: "Valid URL is required" });
       }
-      
+
+      // SSRF Protection: Validate URL to prevent internal network access
+      let parsedUrl: URL;
       try {
-        // Use fetch to get the HTML content
+        parsedUrl = new URL(url);
+      } catch (error) {
+        return res.status(400).json({ message: "Invalid URL format" });
+      }
+
+      // Only allow HTTP/HTTPS protocols
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return res.status(400).json({ message: "Only HTTP and HTTPS URLs are allowed" });
+      }
+
+      // Prevent access to localhost and private IP ranges
+      const hostname = parsedUrl.hostname.toLowerCase();
+
+      // Block localhost and loopback addresses
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('127.')) {
+        return res.status(400).json({ message: "Localhost URLs are not allowed" });
+      }
+
+      // Block private IP ranges (RFC 1918)
+      const ipRegex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+      const ipMatch = hostname.match(ipRegex);
+      if (ipMatch) {
+        const [_, a, b, c, d] = ipMatch.map(Number);
+        // Check for private IP ranges
+        if (
+          (a === 10) || // 10.0.0.0/8
+          (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+          (a === 192 && b === 168) || // 192.168.0.0/16
+          (a === 169 && b === 254) // 169.254.0.0/16 (link-local)
+        ) {
+          return res.status(400).json({ message: "Private IP addresses are not allowed" });
+        }
+      }
+
+      // Block cloud metadata services
+      const blockedHosts = [
+        'metadata.google.internal',
+        '169.254.169.254', // AWS metadata
+        '100.100.100.200', // Alibaba Cloud metadata
+        'metadata.azure.com'
+      ];
+
+      if (blockedHosts.includes(hostname)) {
+        return res.status(400).json({ message: "Access to metadata services is not allowed" });
+      }
+
+      try {
+        // Use fetch to get the HTML content with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
         const response = await fetch(url, {
+          signal: controller.signal,
           headers: {
             // Add a user agent to avoid being blocked
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
           }
         });
-        
+
+        clearTimeout(timeoutId);
+
         if (!response.ok) {
-          return res.status(400).json({ 
-            message: `Failed to fetch webpage: ${response.status} ${response.statusText}` 
+          return res.status(400).json({
+            message: `Failed to fetch webpage: ${response.status} ${response.statusText}`
           });
         }
-        
+
         // Get HTML content as text
         const htmlContent = await response.text();
         // Try to extract <title>
@@ -769,15 +824,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           title = m?.[1]?.trim();
         } catch {}
         // Return JSON used by the client editor
-        return res.json({ 
+        return res.json({
           htmlContent,
           title: title || 'Cloned Website',
-          message: "Website cloned successfully" 
+          message: "Website cloned successfully"
         });
       } catch (error) {
         console.error("Error cloning website:", error);
-        return res.status(400).json({ 
-          message: `Error fetching URL: ${(error as Error)?.message || "Unknown error"}` 
+        return res.status(400).json({
+          message: `Error fetching URL: ${(error as Error)?.message || "Unknown error"}`
         });
       }
     } catch (error) {

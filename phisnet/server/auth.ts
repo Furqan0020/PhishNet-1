@@ -13,6 +13,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { generatePasswordResetToken, verifyPasswordResetToken, sendPasswordResetEmail } from "./email";
+import rateLimit from 'express-rate-limit';
 
 // Maximum login attempts before account lockout
 const MAX_LOGIN_ATTEMPTS = 10;
@@ -158,6 +159,28 @@ function sanitizeInput(input: string): string {
 }
 
 export function setupAuth(app: Express) {
+  // Rate limiting for authentication endpoints
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // Limit each IP to 5 authentication attempts per windowMs
+    message: {
+      error: 'Too many authentication attempts, please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  // Rate limiting for password reset endpoints
+  const passwordResetLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 3, // Limit each IP to 3 password reset attempts per hour
+    message: {
+      error: 'Too many password reset attempts, please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   // Configure session with DATABASE-ONLY storage
   const sessionSettings: session.SessionOptions = {
     secret: process.env.SESSION_SECRET || 'phishnet-secret-key',
@@ -238,7 +261,7 @@ export function setupAuth(app: Express) {
   });
 
   // Registration endpoint
-  app.post("/api/register", async (req, res, next) => {
+  app.post("/api/register", authLimiter, async (req, res, next) => {
     try {
       try {
         userValidationSchema.parse(req.body);
@@ -315,7 +338,7 @@ export function setupAuth(app: Express) {
   });
 
   // Login endpoint
-  app.post("/api/login", (req, res, next) => {
+  app.post("/api/login", authLimiter, (req, res, next) => {
     passport.authenticate("local", (err, user, info) => {
       if (err) {
         return next(err);
@@ -424,7 +447,7 @@ export function setupAuth(app: Express) {
   });
   
   // Forgot password endpoint - initiates password reset flow
-  app.post("/api/forgot-password", async (req, res) => {
+  app.post("/api/forgot-password", passwordResetLimiter, async (req, res) => {
     try {
       // Validate request data
       try {
@@ -478,7 +501,7 @@ export function setupAuth(app: Express) {
   });
   
   // Reset password endpoint - completes password reset with new password
-  app.post("/api/reset-password", async (req, res) => {
+  app.post("/api/reset-password", passwordResetLimiter, async (req, res) => {
     try {
       // Validate request data
       try {
